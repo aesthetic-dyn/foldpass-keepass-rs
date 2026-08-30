@@ -51,4 +51,4 @@ Please see the recommended settings in the [.cargo/config.toml](https://github.c
 MIT — see [LICENSE](LICENSE).
 
 Copyright (c) 2019 Stefan Seemayer and the keepass-rs contributors;  
-modifications Copyright (c) 2026 FOCUS AESTHETIC DYNAMICS S.R.L.
+Modifications Copyright (c) 2026 FOCUS AESTHETIC DYNAMICS S.R.L.
