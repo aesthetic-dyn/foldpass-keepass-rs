@@ -1,3 +1,6 @@
+# foldpass-keepass-rs
+This is a fork of keepass-rs, modified with foldpass changes.
+
 # keepass-rs
 
 [![Crates.io](https://img.shields.io/crates/v/keepass.svg)](https://crates.io/crates/keepass)
