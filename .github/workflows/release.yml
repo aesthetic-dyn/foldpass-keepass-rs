@@ -42,6 +42,8 @@ jobs:
   coverage:
     name: Code Coverage
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write # required for Codecov OIDC (use_oidc)
     steps:
       - uses: actions/checkout@v6
       - name: Get Nix version
@@ -58,7 +60,7 @@ jobs:
         with:
           fail_ci_if_error: true
           verbose: true
-          token: ${{ secrets.CODECOV_TOKEN }}
+          use_oidc: true
 
   get-next-version:
     name: Get the next version
