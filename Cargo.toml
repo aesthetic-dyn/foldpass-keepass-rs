@@ -14,7 +14,6 @@ documentation = "https://docs.rs/foldpass-keepass-rs"
 version = "0.1.1"
 authors = [
     "FOCUS AESTHETIC DYNAMICS S.R.L. <contact@aesthetic-dyn.com>",
-    "Stefan Seemayer <stefan@seemayer.de>",
 ]
 license = "MIT"
 
