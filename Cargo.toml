@@ -11,7 +11,7 @@ homepage = "https://github.com/aesthetic-dyn/foldpass-keepass-rs"
 repository = "https://github.com/aesthetic-dyn/foldpass-keepass-rs"
 documentation = "https://docs.rs/foldpass-keepass-rs"
 
-version = "0.1.1"
+version = "0.0.0-placeholder-version"
 authors = [
     "FOCUS AESTHETIC DYNAMICS S.R.L. <contact@aesthetic-dyn.com>",
 ]
