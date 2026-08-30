@@ -30,7 +30,7 @@ fn parse_xml_keyfile(xml: &[u8]) -> Result<KeyElement, ParseXmlKeyFileError> {
             Event::Eof => break,
 
             Event::Start(e) => {
-                tag_stack.push(String::from_utf8_lossy(e.name().as_ref()).to_string());
+                tag_stack.push(e.name().as_ref().to_string());
             }
 
             Event::End(_) => {
@@ -38,7 +38,7 @@ fn parse_xml_keyfile(xml: &[u8]) -> Result<KeyElement, ParseXmlKeyFileError> {
             }
 
             Event::Text(e) => {
-                let s = e.decode()?.into_owned();
+                let s = e.into_inner().into_owned();
 
                 if tag_stack == ["KeyFile", "Meta", "Version"] {
                     key_version = Some(s);
