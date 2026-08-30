@@ -87,6 +87,7 @@ jobs:
       contents: write # required to push the new git tag
       id-token: write # required for trusted publishing
     runs-on: ubuntu-latest
+    environment: release # must match the environment in the crates.io Trusted Publishing config
     env:
       next-version: ${{ needs.get-next-version.outputs.version }}
 
