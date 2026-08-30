@@ -159,6 +159,22 @@ fn mutation_keyfile_mismatch() {
     );
 }
 
+/// A KDBX4 outer-header field declared shorter than the fixed-width read it
+/// feeds must return an error, not panic. `HEADER_COMPRESSION_ID` is read as a
+/// u32; a 2-byte field used to panic in `byteorder` before any key check.
+#[test]
+fn mutation_short_outer_header_field() {
+    let mut blob = vec![
+        0x03, 0xd9, 0xa2, 0x9a, 0x67, 0xfb, 0x4b, 0xb5, // KDBX4 signature
+        0x00, 0x00, 0x04, 0x00, // version 4.0
+    ];
+    blob.push(3); // HEADER_COMPRESSION_ID
+    blob.extend_from_slice(&2u32.to_le_bytes()); // declared length 2 (< 4)
+    blob.extend_from_slice(&[0, 0]);
+    let res = Database::open(&mut &blob[..], DatabaseKey::new().with_password(""));
+    assert!(res.is_err(), "ShortOuterHeaderField: expected Err, got Ok");
+}
+
 fn locate_header_end(blob: &[u8]) -> Option<usize> {
     let mut off = 12usize;
     while off + 5 <= blob.len() {
