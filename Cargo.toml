@@ -1,7 +1,7 @@
 [package]
 name = "foldpass-keepass-rs"
 description = "Foldpass-maintained fork of the keepass (keepass-rs) KDBX parser, with fixes on top of upstream"
-keywords = ["keepass", "kdbx", "kdb", "password"]
+keywords = ["foldpass", "keepass", "kdbx", "kdb", "password"]
 categories = ["parser-implementations", "security"]
 
 edition = "2018"
@@ -11,7 +11,7 @@ homepage = "https://github.com/aesthetic-dyn/foldpass-keepass-rs"
 repository = "https://github.com/aesthetic-dyn/foldpass-keepass-rs"
 documentation = "https://docs.rs/foldpass-keepass-rs"
 
-version = "0.1.0"
+version = "0.1.1"
 authors = [
     "FOCUS AESTHETIC DYNAMICS S.R.L. <contact@aesthetic-dyn.com>",
     "Stefan Seemayer <stefan@seemayer.de>",
