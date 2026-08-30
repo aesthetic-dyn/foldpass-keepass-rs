@@ -1,7 +1,11 @@
 # foldpass-keepass-rs
-This is a fork of keepass-rs, modified with foldpass changes.
 
-# keepass-rs
+> **Fork notice.** This is a fork of [keepass-rs](https://github.com/sseemayer/keepass-rs)
+> by Stefan Seemayer, maintained by **FOCUS AESTHETIC DYNAMICS S.R.L.** for
+> [Foldpass](https://foldpass.app). It is based on upstream **v0.13.25** and carries a
+> small set of Foldpass-specific fixes on top; upstream changes are tracked and merged in.
+> Not affiliated with or endorsed by the upstream project. The badges below point at
+> upstream. See [LICENSE](LICENSE) for copyright and the MIT terms.
 
 [![Crates.io](https://img.shields.io/crates/v/keepass.svg)](https://crates.io/crates/keepass)
 [![Documentation](https://docs.rs/keepass/badge.svg)](https://docs.rs/keepass/)
@@ -43,4 +47,6 @@ For the best performance, this crate requires specific cargo configuration to en
 Please see the recommended settings in the [.cargo/config.toml](https://github.com/sseemayer/keepass-rs/blob/master/.cargo/config.toml) file in this repository.
 
 ## License
-MIT
+
+MIT — see [LICENSE](LICENSE). Copyright (c) 2019 Stefan Seemayer;
+modifications Copyright (c) 2026 FOCUS AESTHETIC DYNAMICS S.R.L.
