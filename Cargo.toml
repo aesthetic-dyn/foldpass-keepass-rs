@@ -5,7 +5,7 @@ keywords = ["foldpass", "keepass", "kdbx", "kdb", "password"]
 categories = ["parser-implementations", "security"]
 
 edition = "2018"
-rust-version = "1.85.1"
+rust-version = "1.89.0"
 
 homepage = "https://github.com/aesthetic-dyn/foldpass-keepass-rs"
 repository = "https://github.com/aesthetic-dyn/foldpass-keepass-rs"
@@ -65,7 +65,7 @@ chrono = { version = "0.4.23", default-features = false, features = [
 rust-argon2 = "3.0"
 sha1 = { version = "0.11", optional = true }
 sha2 = "0.11"
-aes = "<0.9.3"
+aes = "0.9"
 block-modes = "0.9"
 hmac = "0.13"
 salsa20 = "0.11"
