@@ -88,17 +88,25 @@ impl VariantDictionary {
 
             let value = match value_type {
                 U32_TYPE_ID => VariantDictionaryValue::UInt32(LittleEndian::read_u32(
-                    value_buffer.get(0..4).ok_or(VariantDictionaryError::UnexpectedEof)?,
+                    value_buffer
+                        .get(0..4)
+                        .ok_or(VariantDictionaryError::UnexpectedEof)?,
                 )),
                 U64_TYPE_ID => VariantDictionaryValue::UInt64(LittleEndian::read_u64(
-                    value_buffer.get(0..8).ok_or(VariantDictionaryError::UnexpectedEof)?,
+                    value_buffer
+                        .get(0..8)
+                        .ok_or(VariantDictionaryError::UnexpectedEof)?,
                 )),
                 BOOL_TYPE_ID => VariantDictionaryValue::Bool(value_buffer != [0]),
                 I32_TYPE_ID => VariantDictionaryValue::Int32(LittleEndian::read_i32(
-                    value_buffer.get(0..4).ok_or(VariantDictionaryError::UnexpectedEof)?,
+                    value_buffer
+                        .get(0..4)
+                        .ok_or(VariantDictionaryError::UnexpectedEof)?,
                 )),
                 I64_TYPE_ID => VariantDictionaryValue::Int64(LittleEndian::read_i64(
-                    value_buffer.get(0..8).ok_or(VariantDictionaryError::UnexpectedEof)?,
+                    value_buffer
+                        .get(0..8)
+                        .ok_or(VariantDictionaryError::UnexpectedEof)?,
                 )),
                 STR_TYPE_ID => {
                     VariantDictionaryValue::String(String::from_utf8_lossy(value_buffer).to_string())
