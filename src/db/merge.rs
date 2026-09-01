@@ -926,7 +926,8 @@ fn have_entries_diverged(a: &Entry, b: &Entry) -> bool {
 mod merge_tests {
     use uuid::uuid;
 
-    use crate::db::{fields, EntryId, GroupId, History, Times};
+    use super::{MergeError, MergeEventType};
+    use crate::db::{fields, EntryId, GroupId, History, Times, Value};
     use crate::Database;
 
     const ROOT_GROUP_ID: GroupId = GroupId::from_uuid(uuid!("00000000-0000-0000-0000-000000000001"));
@@ -3046,5 +3047,333 @@ mod merge_tests {
         );
         // other is newer, so its data wins
         assert_eq!(self_db.custom_icon(icon_id).unwrap().data, vec![50, 60, 70, 80]);
+    }
+
+    // ------------------------------------------------------------------
+    // Three-way state-space coverage beyond the original PR tests:
+    // deletions, no-ops, creations, and the edge arms of the decision
+    // gates — enumerating the (self x other relative to ancestor) space.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_ancestor_unchanged_everywhere_is_a_noop() {
+        let ancestor_db = create_test_database();
+        let mut self_db = ancestor_db.clone();
+        let other_db = ancestor_db.clone();
+
+        let result = self_db.merge_with_ancestor(&other_db, &ancestor_db).unwrap();
+        assert_eq!(result.events.len(), 0, "{:?}", result.events);
+        assert_eq!(result.warnings.len(), 0, "{:?}", result.warnings);
+    }
+
+    #[test]
+    fn test_ancestor_deletion_in_other_applies() {
+        let ancestor_db = create_test_database();
+        let mut self_db = ancestor_db.clone();
+        let mut other_db = ancestor_db.clone();
+
+        sleep();
+        other_db.entry_mut(ENTRY1_ID).unwrap().track_changes().remove();
+
+        let result = self_db.merge_with_ancestor(&other_db, &ancestor_db).unwrap();
+        assert!(self_db.entry(ENTRY1_ID).is_none(), "deletion in other must apply");
+        assert_eq!(result.events.len(), 1);
+        assert!(self_db.deleted_objects.contains_key(&ENTRY1_ID.uuid()));
+    }
+
+    #[test]
+    fn test_ancestor_deletion_in_self_is_not_resurrected() {
+        let ancestor_db = create_test_database();
+        let mut self_db = ancestor_db.clone();
+        let other_db = ancestor_db.clone();
+
+        sleep();
+        self_db.entry_mut(ENTRY1_ID).unwrap().track_changes().remove();
+
+        let result = self_db.merge_with_ancestor(&other_db, &ancestor_db).unwrap();
+        assert!(
+            self_db.entry(ENTRY1_ID).is_none(),
+            "an entry deleted here and untouched there must stay deleted"
+        );
+        assert_eq!(result.events.len(), 0, "{:?}", result.events);
+    }
+
+    #[test]
+    fn test_ancestor_deletion_loses_to_later_edit_in_self() {
+        let ancestor_db = create_test_database();
+        let mut self_db = ancestor_db.clone();
+        let mut other_db = ancestor_db.clone();
+
+        sleep();
+        other_db.entry_mut(ENTRY1_ID).unwrap().track_changes().remove();
+
+        sleep();
+        self_db.entry_mut(ENTRY1_ID).unwrap().edit_tracking(|e| {
+            e.set_unprotected(fields::TITLE, "edited_after_the_deletion");
+        });
+
+        let result = self_db.merge_with_ancestor(&other_db, &ancestor_db).unwrap();
+        assert_eq!(
+            self_db.entry(ENTRY1_ID).unwrap().get(fields::TITLE),
+            Some("edited_after_the_deletion"),
+            "an edit newer than the deletion must win"
+        );
+        assert_eq!(result.events.len(), 0, "{:?}", result.events);
+    }
+
+    #[test]
+    fn test_ancestor_deletion_in_self_loses_to_later_edit_in_other() {
+        let ancestor_db = create_test_database();
+        let mut self_db = ancestor_db.clone();
+        let mut other_db = ancestor_db.clone();
+
+        sleep();
+        self_db.entry_mut(ENTRY1_ID).unwrap().track_changes().remove();
+
+        sleep();
+        other_db.entry_mut(ENTRY1_ID).unwrap().edit_tracking(|e| {
+            e.set_unprotected(fields::TITLE, "edited_after_the_deletion");
+        });
+
+        let result = self_db.merge_with_ancestor(&other_db, &ancestor_db).unwrap();
+        let entry = self_db.entry(ENTRY1_ID).expect("entry must be re-added");
+        assert_eq!(entry.get(fields::TITLE), Some("edited_after_the_deletion"));
+        assert_eq!(result.events.len(), 1);
+    }
+
+    #[test]
+    fn test_ancestor_deleted_in_both_stays_deleted() {
+        let ancestor_db = create_test_database();
+        let mut self_db = ancestor_db.clone();
+        let mut other_db = ancestor_db.clone();
+
+        sleep();
+        self_db.entry_mut(ENTRY1_ID).unwrap().track_changes().remove();
+        other_db.entry_mut(ENTRY1_ID).unwrap().track_changes().remove();
+
+        let result = self_db.merge_with_ancestor(&other_db, &ancestor_db).unwrap();
+        assert!(self_db.entry(ENTRY1_ID).is_none());
+        assert_eq!(result.events.len(), 0, "{:?}", result.events);
+        assert_eq!(result.warnings.len(), 0, "{:?}", result.warnings);
+    }
+
+    #[test]
+    fn test_ancestor_entry_created_in_self_survives() {
+        let ancestor_db = create_test_database();
+        let mut self_db = ancestor_db.clone();
+        let other_db = ancestor_db.clone();
+
+        sleep();
+        let new_id = {
+            let mut root = self_db.root_mut();
+            let mut e = root.add_entry();
+            e.set_unprotected(fields::TITLE, "created_after_ancestor");
+            e.times.last_modification = Some(Times::now());
+            e.id()
+        };
+
+        let result = self_db.merge_with_ancestor(&other_db, &ancestor_db).unwrap();
+        assert!(
+            self_db.entry(new_id).is_some(),
+            "a new entry must survive the merge"
+        );
+        assert_eq!(result.events.len(), 0, "{:?}", result.events);
+    }
+
+    /// The equal-timestamp refusal survives even with a true ancestor: an
+    /// entry whose content changed without its clock is an invariant
+    /// violation regardless of what the ancestor says.
+    #[test]
+    fn test_ancestor_equal_timestamp_divergence_still_errors() {
+        let ancestor_db = create_test_database();
+        let mut self_db = ancestor_db.clone();
+        let mut other_db = ancestor_db.clone();
+
+        other_db.entries.get_mut(&ENTRY1_ID).unwrap().fields.insert(
+            fields::TITLE.to_string(),
+            Value::unprotected("changed_without_stamp"),
+        );
+
+        assert!(matches!(
+            self_db.merge_with_ancestor(&other_db, &ancestor_db),
+            Err(MergeError::EntryModificationTimeNotUpdated(_))
+        ));
+    }
+
+    #[test]
+    fn test_ancestor_group_equal_timestamp_divergence_still_errors() {
+        let ancestor_db = create_test_database();
+        let mut self_db = ancestor_db.clone();
+        let mut other_db = ancestor_db.clone();
+
+        other_db.groups.get_mut(&GROUP1_ID).unwrap().name = "renamed_without_stamp".to_string();
+
+        assert!(matches!(
+            self_db.merge_with_ancestor(&other_db, &ancestor_db),
+            Err(MergeError::GroupModificationTimeNotUpdated(_))
+        ));
+    }
+
+    /// The conflict warning is gated on the ancestor entry carrying a
+    /// modification timestamp; without one the merge cannot age the sides
+    /// against the ancestor and resolves silently by newest-wins.
+    #[test]
+    fn test_ancestor_without_timestamp_resolves_silently() {
+        let base = create_test_database();
+        let mut ancestor_db = base.clone();
+        ancestor_db
+            .entries
+            .get_mut(&ENTRY1_ID)
+            .unwrap()
+            .times
+            .last_modification = None;
+        let mut self_db = base.clone();
+        let mut other_db = base.clone();
+
+        sleep();
+        self_db.entry_mut(ENTRY1_ID).unwrap().edit_tracking(|e| {
+            e.set_unprotected(fields::TITLE, "updated_in_self");
+        });
+        sleep();
+        other_db.entry_mut(ENTRY1_ID).unwrap().edit_tracking(|e| {
+            e.set_unprotected(fields::TITLE, "updated_in_other");
+        });
+
+        let result = self_db.merge_with_ancestor(&other_db, &ancestor_db).unwrap();
+        assert_eq!(
+            result.warnings.len(),
+            0,
+            "no ancestor clock, no conflict warning: {:?}",
+            result.warnings
+        );
+        assert_eq!(
+            self_db.entry(ENTRY1_ID).unwrap().get(fields::TITLE),
+            Some("updated_in_other"),
+            "newest still wins"
+        );
+    }
+
+    /// CHARACTERIZATION of an asymmetry inherited from the two-way merge:
+    /// when the conflict resolves toward SELF (self is newer), the other
+    /// side's losing value is preserved nowhere — not live, not in history.
+    /// The source-newer direction preserves the loser in history (see
+    /// test_ancestor_true_conflict_warns_and_newest_wins). If this test
+    /// goes red because the loser starts being preserved, that is an
+    /// improvement — update the test, do not restore the old behavior.
+    #[test]
+    fn test_ancestor_conflict_where_self_is_newer_keeps_self_and_drops_other() {
+        let ancestor_db = create_test_database();
+        let mut self_db = ancestor_db.clone();
+        let mut other_db = ancestor_db.clone();
+
+        sleep();
+        other_db.entry_mut(ENTRY1_ID).unwrap().edit_tracking(|e| {
+            e.set_unprotected(fields::TITLE, "entry1_updated_in_other");
+        });
+        sleep();
+        self_db.entry_mut(ENTRY1_ID).unwrap().edit_tracking(|e| {
+            e.set_unprotected(fields::TITLE, "entry1_updated_in_self");
+        });
+
+        let result = self_db.merge_with_ancestor(&other_db, &ancestor_db).unwrap();
+        assert_eq!(result.warnings.len(), 1, "{:?}", result.warnings);
+        assert_eq!(
+            self_db.entry(ENTRY1_ID).unwrap().get(fields::TITLE),
+            Some("entry1_updated_in_self"),
+        );
+
+        let history = self_db.entry(ENTRY1_ID).unwrap().history.clone().unwrap();
+        assert!(
+            !history
+                .entries
+                .iter()
+                .any(|e| e.get(fields::TITLE) == Some("entry1_updated_in_other")),
+            "documents current behavior: the losing OTHER value is dropped entirely",
+        );
+    }
+
+    #[test]
+    fn test_ancestor_icon_deletion_applies() {
+        let mut ancestor_db = create_test_database();
+        let icon_id = ancestor_db
+            .entry_mut(ENTRY1_ID)
+            .unwrap()
+            .track_changes()
+            .set_icon_custom_new(vec![1, 2, 3, 4])
+            .id();
+        let mut self_db = ancestor_db.clone();
+        let mut other_db = ancestor_db.clone();
+
+        sleep();
+        other_db.custom_icons.remove(&icon_id);
+        other_db
+            .deleted_objects
+            .insert(icon_id.uuid(), Some(Times::now()));
+
+        let result = self_db.merge_with_ancestor(&other_db, &ancestor_db).unwrap();
+        assert!(self_db.custom_icon(icon_id).is_none(), "icon deletion must apply");
+        assert!(result
+            .events
+            .iter()
+            .any(|e| matches!(e.event_type, MergeEventType::Deleted)));
+    }
+
+    #[test]
+    fn test_ancestor_icon_deletion_loses_to_later_modification() {
+        let mut ancestor_db = create_test_database();
+        let icon_id = ancestor_db
+            .entry_mut(ENTRY1_ID)
+            .unwrap()
+            .track_changes()
+            .set_icon_custom_new(vec![1, 2, 3, 4])
+            .id();
+        let mut self_db = ancestor_db.clone();
+        let mut other_db = ancestor_db.clone();
+
+        sleep();
+        self_db.custom_icons.remove(&icon_id);
+        self_db.deleted_objects.insert(icon_id.uuid(), Some(Times::now()));
+
+        sleep();
+        {
+            let mut icon = other_db.custom_icon_mut(icon_id).unwrap();
+            icon.data = vec![9, 9, 9];
+            icon.last_modification_time = Some(Times::now());
+        }
+
+        let _result = self_db.merge_with_ancestor(&other_db, &ancestor_db).unwrap();
+        let icon = self_db
+            .custom_icon(icon_id)
+            .expect("an icon modified after its deletion must be re-added");
+        assert_eq!(icon.data, vec![9, 9, 9]);
+    }
+
+    /// Equal icon timestamps with different data warn rather than error —
+    /// pins the icon counterpart of the entry/group refusal.
+    #[test]
+    fn test_ancestor_icon_equal_timestamp_divergence_warns() {
+        let mut ancestor_db = create_test_database();
+        let icon_id = ancestor_db
+            .entry_mut(ENTRY1_ID)
+            .unwrap()
+            .track_changes()
+            .set_icon_custom_new(vec![1, 2, 3, 4])
+            .id();
+        let mut self_db = ancestor_db.clone();
+        let mut other_db = ancestor_db.clone();
+
+        other_db.custom_icons.get_mut(&icon_id).unwrap().data = vec![5, 6, 7, 8];
+
+        let result = self_db.merge_with_ancestor(&other_db, &ancestor_db).unwrap();
+        assert!(
+            result.warnings.iter().any(|w| w.contains("Custom icons")),
+            "{:?}",
+            result.warnings
+        );
+        assert_eq!(
+            self_db.custom_icon(icon_id).unwrap().data,
+            vec![1, 2, 3, 4],
+            "destination side is kept"
+        );
     }
 }
