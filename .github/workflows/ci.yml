@@ -220,4 +220,4 @@ jobs:
       - name: Add wasm32 target
         run: rustup target add wasm32-unknown-unknown
       - name: Cargo check keepass lib for wasm32 (no default features)
-        run: cargo check --target wasm32-unknown-unknown --no-default-features --lib -p keepass
+        run: cargo check --target wasm32-unknown-unknown --no-default-features --lib -p foldpass-keepass-rs
