@@ -650,6 +650,21 @@ fn merge_entries(
                 target: MergeEventTarget::Entry(id),
                 event_type: MergeEventType::Updated,
             });
+        } else if have_entries_diverged(&dest_entry, &source_entry) {
+            // The destination entry is more recent and wins — but unlike the
+            // branch above, the source's losing state is in NEITHER side's
+            // history (a tracked edit records the PRE-edit state, never the
+            // live one), so without this it would survive nowhere. Skip only
+            // when the newest history row already equals it.
+            let already_recorded = merged_history
+                .entries
+                .first()
+                .is_some_and(|h| !have_entries_diverged(&source_entry, h));
+            if !already_recorded {
+                let mut source_entry_for_history = source_entry.deref().clone();
+                source_entry_for_history.history = None;
+                merged_history.add_entry(source_entry_for_history);
+            }
         }
 
         dest_entry.history = Some(merged_history);
@@ -3253,15 +3268,13 @@ mod merge_tests {
         );
     }
 
-    /// CHARACTERIZATION of an asymmetry inherited from the two-way merge:
-    /// when the conflict resolves toward SELF (self is newer), the other
-    /// side's losing value is preserved nowhere — not live, not in history.
-    /// The source-newer direction preserves the loser in history (see
-    /// test_ancestor_true_conflict_warns_and_newest_wins). If this test
-    /// goes red because the loser starts being preserved, that is an
-    /// improvement — update the test, do not restore the old behavior.
+    /// Both conflict directions preserve the losing value in history. The
+    /// source-newer direction always did (see
+    /// test_ancestor_true_conflict_warns_and_newest_wins); the dest-newer
+    /// direction used to drop the other side's value entirely — not live,
+    /// not in history.
     #[test]
-    fn test_ancestor_conflict_where_self_is_newer_keeps_self_and_drops_other() {
+    fn test_ancestor_conflict_where_self_is_newer_preserves_other_in_history() {
         let ancestor_db = create_test_database();
         let mut self_db = ancestor_db.clone();
         let mut other_db = ancestor_db.clone();
@@ -3283,12 +3296,112 @@ mod merge_tests {
         );
 
         let history = self_db.entry(ENTRY1_ID).unwrap().history.clone().unwrap();
+        assert_history_ordered(&history);
+        assert!(
+            history
+                .entries
+                .iter()
+                .any(|e| e.get(fields::TITLE) == Some("entry1_updated_in_other")),
+            "the losing OTHER value must survive in history",
+        );
+    }
+
+    /// The same guarantee through the plain two-way entry point.
+    #[test]
+    fn test_two_way_conflict_where_self_is_newer_preserves_other_in_history() {
+        let base = create_test_database();
+        let mut self_db = base.clone();
+        let mut other_db = base.clone();
+
+        sleep();
+        other_db.entry_mut(ENTRY1_ID).unwrap().edit_tracking(|e| {
+            e.set_unprotected(fields::TITLE, "entry1_updated_in_other");
+        });
+        sleep();
+        self_db.entry_mut(ENTRY1_ID).unwrap().edit_tracking(|e| {
+            e.set_unprotected(fields::TITLE, "entry1_updated_in_self");
+        });
+
+        self_db.merge(&other_db).unwrap();
+        assert_eq!(
+            self_db.entry(ENTRY1_ID).unwrap().get(fields::TITLE),
+            Some("entry1_updated_in_self"),
+        );
+        let history = self_db.entry(ENTRY1_ID).unwrap().history.clone().unwrap();
+        assert!(
+            history
+                .entries
+                .iter()
+                .any(|e| e.get(fields::TITLE) == Some("entry1_updated_in_other")),
+            "the losing OTHER value must survive in history",
+        );
+    }
+
+    /// Re-merging the same source must not duplicate the preserved loser.
+    #[test]
+    fn test_conflict_loser_preservation_is_idempotent() {
+        let ancestor_db = create_test_database();
+        let mut self_db = ancestor_db.clone();
+        let mut other_db = ancestor_db.clone();
+
+        sleep();
+        other_db.entry_mut(ENTRY1_ID).unwrap().edit_tracking(|e| {
+            e.set_unprotected(fields::TITLE, "entry1_updated_in_other");
+        });
+        sleep();
+        self_db.entry_mut(ENTRY1_ID).unwrap().edit_tracking(|e| {
+            e.set_unprotected(fields::TITLE, "entry1_updated_in_self");
+        });
+
+        self_db.merge_with_ancestor(&other_db, &ancestor_db).unwrap();
+        let len_after_first = self_db
+            .entry(ENTRY1_ID)
+            .unwrap()
+            .history
+            .clone()
+            .unwrap()
+            .entries
+            .len();
+        self_db.merge_with_ancestor(&other_db, &ancestor_db).unwrap();
+        let len_after_second = self_db
+            .entry(ENTRY1_ID)
+            .unwrap()
+            .history
+            .clone()
+            .unwrap()
+            .entries
+            .len();
+        assert_eq!(
+            len_after_first, len_after_second,
+            "no duplicate history rows on re-merge"
+        );
+    }
+
+    /// Identical values reached at different times are not a conflict and
+    /// must not pollute history with a phantom loser.
+    #[test]
+    fn test_dest_newer_with_identical_content_records_nothing() {
+        let ancestor_db = create_test_database();
+        let mut self_db = ancestor_db.clone();
+        let mut other_db = ancestor_db.clone();
+
+        sleep();
+        other_db.entry_mut(ENTRY1_ID).unwrap().edit_tracking(|e| {
+            e.set_unprotected(fields::TITLE, "same_value");
+        });
+        sleep();
+        self_db.entry_mut(ENTRY1_ID).unwrap().edit_tracking(|e| {
+            e.set_unprotected(fields::TITLE, "same_value");
+        });
+
+        self_db.merge_with_ancestor(&other_db, &ancestor_db).unwrap();
+        let history = self_db.entry(ENTRY1_ID).unwrap().history.clone().unwrap();
         assert!(
             !history
                 .entries
                 .iter()
-                .any(|e| e.get(fields::TITLE) == Some("entry1_updated_in_other")),
-            "documents current behavior: the losing OTHER value is dropped entirely",
+                .any(|e| e.get(fields::TITLE) == Some("same_value")),
+            "identical content is not a loser to record",
         );
     }
 
