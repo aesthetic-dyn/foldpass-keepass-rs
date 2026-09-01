@@ -15,7 +15,7 @@ use crate::{
             INNER_HEADER_RANDOM_STREAM_KEY,
         },
         variant_dictionary::VariantDictionary,
-        DatabaseVersion,
+        DatabaseVersion, KDBX4_CURRENT_MINOR_VERSION,
     },
     key::DatabaseKey,
 };
@@ -28,8 +28,14 @@ pub fn dump_kdbx4(
     db_key: &DatabaseKey,
     writer: &mut dyn Write,
 ) -> Result<(), DatabaseSaveError> {
-    if !matches!(db.config.version, DatabaseVersion::KDB4(1)) {
-        return Err(DatabaseSaveError::UnsupportedVersion);
+    // Accept any KDBX4 minor version up to the one this writer produces.
+    // KeePassXC writes 4.0 for databases without 4.1 features, and refusing
+    // to re-save a database we just opened strands the user. Minor versions
+    // newer than ours are still refused: they may carry features this
+    // serializer would silently drop.
+    match db.config.version {
+        DatabaseVersion::KDB4(minor) if minor <= KDBX4_CURRENT_MINOR_VERSION => {}
+        _ => return Err(DatabaseSaveError::UnsupportedVersion),
     }
 
     // generate encryption keys and seeds on the fly when saving
@@ -50,7 +56,9 @@ pub fn dump_kdbx4(
     // dump the outer header - need to buffer so that SHA256 can be computed
     let mut header_data = Vec::new();
 
-    db.config.version.dump(&mut header_data)?;
+    // Always write the current minor version: 4.1 is a superset of 4.0 and
+    // this serializer emits 4.1 fields, so a 4.0 input is upgraded on save.
+    DatabaseVersion::KDB4(KDBX4_CURRENT_MINOR_VERSION).dump(&mut header_data)?;
 
     KDBX4OuterHeader {
         outer_cipher_config: db.config.outer_cipher_config.clone(),

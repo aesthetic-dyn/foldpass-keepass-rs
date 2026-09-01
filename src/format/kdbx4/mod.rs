@@ -295,4 +295,45 @@ mod kdbx4_tests {
         let group = root.group_by_name("Group with custom icon").unwrap();
         assert_eq!(group.custom_icon().unwrap().data, &[0x04, 0x03, 0x02, 0x01]);
     }
+
+    /// A KDBX 4.0 database (what KeePassXC writes when no 4.1 features are
+    /// used) must be re-savable, upgraded to the current minor version. It
+    /// previously failed with UnsupportedVersion right after a clean open.
+    #[test]
+    pub fn test_kdbx40_database_saves_as_current_minor() {
+        let mut db = Database::new();
+        db.root_mut().add_entry().edit(|e| {
+            e.set_unprotected(fields::TITLE, "survives the upgrade");
+        });
+        db.config.version = DatabaseVersion::KDB4(0);
+
+        let db_key = DatabaseKey::new().with_password("test");
+        let mut encrypted = Vec::new();
+        dump_kdbx4(&db, &db_key, &mut encrypted).unwrap();
+
+        // header: minor 1, major 4
+        assert_eq!(&encrypted[8..12], &[0x01, 0x00, 0x04, 0x00]);
+
+        let reopened = parse_kdbx4(&encrypted, &db_key).unwrap();
+        assert_eq!(
+            reopened.config.version,
+            DatabaseVersion::KDB4(KDBX4_CURRENT_MINOR_VERSION)
+        );
+        assert!(reopened.root().entry_by_name("survives the upgrade").is_some());
+    }
+
+    /// A minor version newer than this writer's is still refused: it may
+    /// carry features the serializer would silently drop.
+    #[test]
+    pub fn test_future_kdbx4_minor_version_is_refused() {
+        let mut db = Database::new();
+        db.config.version = DatabaseVersion::KDB4(KDBX4_CURRENT_MINOR_VERSION + 1);
+
+        let db_key = DatabaseKey::new().with_password("test");
+        let mut encrypted = Vec::new();
+        assert!(matches!(
+            dump_kdbx4(&db, &db_key, &mut encrypted),
+            Err(crate::db::DatabaseSaveError::UnsupportedVersion)
+        ));
+    }
 }
