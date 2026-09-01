@@ -4,7 +4,10 @@
 //! types in this module describe what a merge changed, via the returned
 //! [`MergeLog`].
 
-use std::{collections::HashSet, ops::Deref};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashSet},
+    ops::Deref,
+};
 
 use chrono::NaiveDateTime;
 use thiserror::Error;
@@ -851,7 +854,7 @@ fn merge_icons(
         });
 
         if dest_last_modification == source_last_modification {
-            if dest_icon != source_icon {
+            if have_icons_diverged(dest_icon, source_icon) {
                 log.warnings.push(format!(
                     "Custom icons with UUID {} have the same modification time but have diverged.",
                     id,
@@ -875,7 +878,8 @@ fn merge_icons(
             continue;
         }
 
-        if dest_changed && dest_icon != source_icon && base_db.custom_icons.contains_key(&id) {
+        if dest_changed && have_icons_diverged(dest_icon, source_icon) && base_db.custom_icons.contains_key(&id)
+        {
             // both sides changed since the ancestor and content diverged — real conflict
             log.warnings.push(format!(
                 "Custom icon {id} was modified in both databases since the common ancestor. \
@@ -900,40 +904,44 @@ fn merge_icons(
     Ok(())
 }
 
-fn have_groups_diverged(a: &Group, b: &Group) -> bool {
-    let new_times = Times::default();
-
-    let mut a = a.clone();
-    a.times = new_times.clone();
-    a.entries.clear();
-    a.groups.clear();
-    a.parent = None;
-    // previous_parent_group tracks location history, not content; exclude from divergence check
-    a.previous_parent_group = None;
-
-    let mut b = b.clone();
-    b.times = new_times.clone();
-    b.entries.clear();
-    b.groups.clear();
-    b.parent = None;
-    b.previous_parent_group = None;
-
-    !a.eq(&b)
+/// The group content the divergence check compares: name, non-empty notes,
+/// and tags. Anything else may differ between serializers without a timestamp
+/// change and must not read as divergence.
+fn group_content(g: &Group) -> (&str, Option<&str>, BTreeSet<&str>) {
+    (
+        g.name.as_str(),
+        g.notes.as_deref().filter(|n| !n.is_empty()),
+        g.tags.iter().map(String::as_str).collect(),
+    )
 }
 
-/// Check if two entries are dissimilar, ignoring their timestamps.
+/// Check if two groups are dissimilar in content.
+fn have_groups_diverged(a: &Group, b: &Group) -> bool {
+    group_content(a) != group_content(b)
+}
+
+/// The entry content the divergence check compares: non-empty field values
+/// (an empty field equals an absent one; protection is not content) and tags.
+fn entry_content(e: &Entry) -> (BTreeMap<&str, &str>, BTreeSet<&str>) {
+    (
+        e.fields
+            .iter()
+            .filter(|(_, v)| !v.get().is_empty())
+            .map(|(k, v)| (k.as_str(), v.get().as_str()))
+            .collect(),
+        e.tags.iter().map(String::as_str).collect(),
+    )
+}
+
+/// Check if two entries are dissimilar in content.
 fn have_entries_diverged(a: &Entry, b: &Entry) -> bool {
-    let new_times = Times::default();
+    entry_content(a) != entry_content(b)
+}
 
-    let mut a = a.clone();
-    a.times = new_times.clone();
-    a.history = None;
-
-    let mut b = b.clone();
-    b.times = new_times.clone();
-    b.history = None;
-
-    !a.eq(&b)
+/// Check if two custom icons are dissimilar in content: name and image data.
+/// The entry/group sets are derived back-references, not content.
+fn have_icons_diverged(a: &crate::db::CustomIcon, b: &crate::db::CustomIcon) -> bool {
+    a.name != b.name || a.data != b.data
 }
 
 #[allow(clippy::indexing_slicing, clippy::unwrap_used, clippy::expect_used)]
@@ -942,7 +950,7 @@ mod merge_tests {
     use uuid::uuid;
 
     use super::{MergeError, MergeEventType};
-    use crate::db::{fields, EntryId, GroupId, History, Times, Value};
+    use crate::db::{fields, AutoType, DataTransferObfuscation, EntryId, GroupId, History, Icon, Times, Value};
     use crate::Database;
 
     const ROOT_GROUP_ID: GroupId = GroupId::from_uuid(uuid!("00000000-0000-0000-0000-000000000001"));
@@ -3488,5 +3496,142 @@ mod merge_tests {
             vec![1, 2, 3, 4],
             "destination side is kept"
         );
+    }
+
+    /// What a KeePassXC 2.7.12 save materializes on untouched objects must
+    /// merge as a clean no-op, not a refusal.
+    #[test]
+    fn test_another_clients_serialization_dialect_is_not_divergence() {
+        let mut destination_db = create_test_database();
+        let mut source_db = destination_db.clone();
+
+        for entry in source_db.entries.values_mut() {
+            entry.fields.insert("Notes".to_string(), Value::unprotected(""));
+            entry.autotype = Some(AutoType {
+                enabled: true,
+                default_sequence: None,
+                data_transfer_obfuscation: DataTransferObfuscation::None,
+                associations: vec![],
+            });
+            entry.icon = Some(Icon::BuiltIn(0));
+        }
+        for group in source_db.groups.values_mut() {
+            group.icon = Some(Icon::BuiltIn(48));
+            group.is_expanded = false;
+            group.last_top_visible_entry =
+                Some(EntryId::from_uuid(uuid!("00000000-0000-0000-0000-000000000000")));
+        }
+
+        let result = destination_db.merge(&source_db).unwrap();
+        assert_eq!(result.warnings.len(), 0, "{:?}", result.warnings);
+        assert_eq!(result.events.len(), 0, "{:?}", result.events);
+    }
+
+    /// A real value difference at an equal modification time still refuses.
+    #[test]
+    fn test_real_divergence_at_equal_timestamps_still_errors() {
+        let mut destination_db = create_test_database();
+        let mut source_db = destination_db.clone();
+        source_db
+            .entries
+            .get_mut(&ENTRY1_ID)
+            .unwrap()
+            .fields
+            .insert("Notes".to_string(), Value::unprotected("actual content"));
+
+        assert!(matches!(
+            destination_db.merge(&source_db),
+            Err(MergeError::EntryModificationTimeNotUpdated(_))
+        ));
+    }
+
+    /// Only content — field values and tags — counts as divergence, and a
+    /// real difference in it always does.
+    #[test]
+    fn test_divergence_compares_content_and_nothing_else() {
+        let db = create_test_database();
+        let a = db.entries.get(&ENTRY1_ID).unwrap().clone();
+
+        let mut b = a.clone();
+        b.autotype = Some(AutoType {
+            enabled: false,
+            default_sequence: Some("{USERNAME}{TAB}{PASSWORD}{ENTER}".to_string()),
+            data_transfer_obfuscation: DataTransferObfuscation::None,
+            associations: vec![],
+        });
+        b.icon = Some(Icon::BuiltIn(5));
+        b.parent = GROUP2_ID;
+        b.previous_parent_group = Some(ROOT_GROUP_ID);
+        b.fields.insert("Notes".to_string(), Value::unprotected(""));
+        assert!(
+            !super::have_entries_diverged(&a, &b),
+            "auto-type, icons, location, and empty fields are not content"
+        );
+
+        let mut b = a.clone();
+        b.fields.insert("Notes".to_string(), Value::unprotected("text"));
+        assert!(super::have_entries_diverged(&a, &b), "a real note is content");
+
+        let mut a2 = a.clone();
+        a2.fields.insert("PIN".to_string(), Value::protected("1234"));
+        let mut b = a2.clone();
+        b.fields.insert("PIN".to_string(), Value::unprotected("1234"));
+        assert!(
+            !super::have_entries_diverged(&a2, &b),
+            "the protection flag is a memory attribute, not content"
+        );
+        let mut b = a2.clone();
+        b.fields.insert("PIN".to_string(), Value::protected("9999"));
+        assert!(
+            super::have_entries_diverged(&a2, &b),
+            "a changed value is content"
+        );
+
+        let mut a2 = a.clone();
+        a2.tags = vec!["work".to_string(), "bank".to_string()];
+        let mut b = a2.clone();
+        b.tags = vec!["bank".to_string(), "work".to_string()];
+        assert!(!super::have_entries_diverged(&a2, &b), "tag order is dialect");
+        let mut b = a2.clone();
+        b.tags.push("shared".to_string());
+        assert!(super::have_entries_diverged(&a2, &b), "a new tag is content");
+
+        let ga = db.groups.get(&GROUP1_ID).unwrap().clone();
+
+        let mut gb = ga.clone();
+        gb.icon = Some(Icon::BuiltIn(48));
+        gb.is_expanded = !gb.is_expanded;
+        gb.last_top_visible_entry = Some(ENTRY1_ID);
+        gb.notes = Some(String::new());
+        assert!(
+            !super::have_groups_diverged(&ga, &gb),
+            "view state, icons, and empty notes are not content"
+        );
+
+        let mut gb = ga.clone();
+        gb.name = "renamed".to_string();
+        assert!(super::have_groups_diverged(&ga, &gb), "a rename is content");
+
+        // Icon reconciliation compares name and data, never the derived
+        // back-reference bookkeeping.
+        let db2 = {
+            let mut db2 = Database::new();
+            let root = db2.root().id();
+            db2.group_mut(root)
+                .unwrap()
+                .add_entry()
+                .set_icon_custom_new(vec![1, 2, 3]);
+            db2
+        };
+        let ia = db2.iter_all_custom_icons().next().unwrap().clone();
+        let mut ib = ia.clone();
+        ib.entries.clear();
+        assert!(
+            !super::have_icons_diverged(&ia, &ib),
+            "back-references are not content"
+        );
+        let mut ib = ia.clone();
+        ib.data = vec![9, 9, 9];
+        assert!(super::have_icons_diverged(&ia, &ib), "image data is content");
     }
 }
