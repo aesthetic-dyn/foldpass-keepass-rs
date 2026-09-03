@@ -1,12 +1,12 @@
 use thiserror::Error;
 
 use crate::{
-    config::DatabaseVersion,
+    config::{DatabaseVersion, KdfConfig},
     db::Database,
     format::{
         kdb::parse_kdb,
         kdbx3::{decrypt_kdbx3, parse_kdbx3},
-        kdbx4::{decrypt_kdbx4, parse_kdbx4},
+        kdbx4::{decrypt_kdbx4, parse_kdbx4, read_kdf_config},
         DatabaseVersionParseError,
     },
     DatabaseKey,
@@ -48,6 +48,22 @@ impl Database {
         };
 
         Ok(data)
+    }
+
+    /// Read the KDF configuration a KDBX4 database declares, without deriving a key.
+    ///
+    /// The KDBX4 outer header names the KDF and its cost before anything is
+    /// authenticated, and [`Database::open`] runs the KDF at whatever cost the
+    /// header declares — a hostile file can declare hours of work. A caller that
+    /// wants to refuse an unreasonable declared cost must be able to see it first.
+    /// Only the header is parsed; nothing is verified, so this reports what the
+    /// file claims, not that the file is sound. Other formats return
+    /// [`DatabaseOpenError::UnsupportedVersion`].
+    pub fn declared_kdf_config(data: &[u8]) -> Result<KdfConfig, DatabaseOpenError> {
+        match DatabaseVersion::parse(data)? {
+            DatabaseVersion::KDB4(_) => read_kdf_config(data),
+            _ => Err(DatabaseOpenError::UnsupportedVersion),
+        }
     }
 
     /// Get the version of a database without decrypting it

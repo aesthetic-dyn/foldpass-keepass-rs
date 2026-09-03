@@ -37,6 +37,17 @@ pub(crate) fn parse_kdbx4(data: &[u8], db_key: &DatabaseKey) -> Result<Database,
     Ok(db)
 }
 
+/// Read the KDF configuration a KDBX4 file declares, without deriving a key.
+///
+/// Only the outer header is parsed; nothing is verified. The result is what the
+/// file CLAIMS its key derivation costs, which `parse_kdbx4` will spend in full
+/// before any authentication can fail.
+pub(crate) fn read_kdf_config(data: &[u8]) -> Result<KdfConfig, DatabaseOpenError> {
+    let (outer_header, _) = parse_outer_header(data)
+        .map_err(|e| DatabaseOpenError::Format(DatabaseFormatError::Kdbx4(Kdbx4OpenError::OuterHeader(e))))?;
+    Ok(outer_header.kdf_config)
+}
+
 /// Open and decrypt a KeePass KDBX4 database from a source and key elements
 #[allow(clippy::type_complexity)]
 pub(crate) fn decrypt_kdbx4(
