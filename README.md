@@ -9,7 +9,7 @@
 
 > **Fork notice.** This is a fork of [keepass-rs](https://github.com/sseemayer/keepass-rs)
 > by Stefan Seemayer, maintained by **FOCUS AESTHETIC DYNAMICS S.R.L.** for
-> [Foldpass](https://foldpass.app). It is based on upstream **v0.13.25** and carries a
+> [Foldpass](https://foldpass.app). It is based on upstream **v0.14.0** and carries a
 > small set of Foldpass-specific fixes on top; upstream changes are tracked and merged in.
 > Not affiliated with or endorsed by the upstream project.
 > See [LICENSE](LICENSE) for copyright and the MIT terms.
