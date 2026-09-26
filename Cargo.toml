@@ -5,7 +5,7 @@ keywords = ["foldpass", "keepass", "kdbx", "kdb", "password"]
 categories = ["parser-implementations", "security"]
 
 edition = "2018"
-rust-version = "1.89.0"
+rust-version = "1.89"
 
 homepage = "https://github.com/aesthetic-dyn/foldpass-keepass-rs"
 repository = "https://github.com/aesthetic-dyn/foldpass-keepass-rs"
