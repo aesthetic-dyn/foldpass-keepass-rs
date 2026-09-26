@@ -26,7 +26,7 @@ include = [
 ]
 
 [package.metadata]
-upstream = "keepass-rs 0.14.0"
+upstream = "keepass-rs 0.15.0"
 
 # Package publishes as `foldpass-keepass-rs`, but the library is still imported as
 # `keepass` — keeps this crate's own tests/bins and downstream `use keepass::…`
