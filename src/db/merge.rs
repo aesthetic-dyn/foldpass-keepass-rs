@@ -654,19 +654,32 @@ fn merge_entries(
                 event_type: MergeEventType::Updated,
             });
         } else if have_entries_diverged(&dest_entry, &source_entry) {
-            // The destination entry is more recent and wins — but unlike the
-            // branch above, the source's losing state is in NEITHER side's
-            // history (a tracked edit records the PRE-edit state, never the
-            // live one), so without this it would survive nowhere. Skip only
-            // when the newest history row already equals it.
-            let already_recorded = merged_history
-                .entries
-                .first()
-                .is_some_and(|h| !have_entries_diverged(&source_entry, h));
-            if !already_recorded {
-                let mut source_entry_for_history = source_entry.deref().clone();
-                source_entry_for_history.history = None;
-                merged_history.add_entry(source_entry_for_history);
+            // The destination entry is more recent and wins, but the source's losing
+            // state is in neither side's history (a tracked edit records the pre-edit
+            // state, never the live one), so file it there, as KeePassXC does. Identical
+            // content reached at different times is not a conflict and records nothing.
+            let mut source_version = source_entry.clone();
+            source_version.history = None;
+            // a move files a version with the same timestamp and contents, in the old location
+            let already_filed = merged_history.entries.iter().any(|version| {
+                version.times.last_modification == source_version.times.last_modification
+                    && !have_entry_contents_diverged(version, &source_version)
+            });
+            if !already_filed {
+                let versions_before = merged_history.entries.len();
+                merged_history = merge_history(
+                    &merged_history,
+                    &History {
+                        entries: vec![source_version],
+                    },
+                    log,
+                )?;
+                if merged_history.entries.len() > versions_before {
+                    log.events.push(MergeEvent {
+                        target: MergeEventTarget::Entry(id),
+                        event_type: MergeEventType::Updated,
+                    });
+                }
             }
         }
 
@@ -942,6 +955,14 @@ fn have_entries_diverged(a: &Entry, b: &Entry) -> bool {
 /// The entry/group sets are derived back-references, not content.
 fn have_icons_diverged(a: &crate::db::CustomIcon, b: &crate::db::CustomIcon) -> bool {
     a.name != b.name || a.data != b.data
+}
+
+/// Check if two entries hold different contents, ignoring their timestamps and location.
+fn have_entry_contents_diverged(a: &Entry, b: &Entry) -> bool {
+    let mut b = b.clone();
+    b.parent = a.parent;
+    b.previous_parent_group = a.previous_parent_group;
+    have_entries_diverged(a, &b)
 }
 
 #[allow(clippy::indexing_slicing, clippy::unwrap_used, clippy::expect_used)]
@@ -1845,6 +1866,14 @@ mod merge_tests {
         // check that content from destination is kept
         assert_eq!(entry.get(fields::TITLE), Some("entry2_modified_in_destination"));
         assert_eq!(entry.times.last_modification, Some(entry_modified_timestamp));
+
+        // and the source's edit is in the history
+        let history = entry.history.clone().unwrap();
+        assert_history_ordered(&history);
+        assert_eq!(
+            history.entries[0].get(fields::TITLE),
+            Some("entry2_modified_in_source")
+        );
     }
 
     /// Test that if an entry is moved in source and modified in destination, the entry stays
@@ -2161,6 +2190,58 @@ mod merge_tests {
         assert_eq!(merge_result.events.len(), 0);
     }
 
+    /// Test that when both sides changed an entry and the destination's change is newer, the
+    /// source's change is kept in the entry's history rather than lost.
+    #[test]
+    fn test_update_with_conflicts_destination_newer() {
+        let mut destination_db = create_test_database();
+        let mut source_db = destination_db.clone();
+
+        sleep();
+
+        // update entry in source
+        source_db.entry_mut(ENTRY1_ID).unwrap().edit_tracking(|e| {
+            e.set_unprotected("Title", "entry1_updated_from_source");
+        });
+
+        sleep();
+
+        // update entry in destination
+        destination_db.entry_mut(ENTRY1_ID).unwrap().edit_tracking(|e| {
+            e.set_unprotected("Title", "entry1_updated_from_destination");
+        });
+
+        let merge_result = destination_db.merge(&source_db).unwrap();
+        assert_eq!(merge_result.warnings.len(), 0);
+        assert_eq!(merge_result.events.len(), 1);
+
+        // the newer destination change stays current
+        let entry = destination_db.entry(ENTRY1_ID).unwrap();
+        assert_eq!(entry.get(fields::TITLE), Some("entry1_updated_from_destination"));
+
+        // and the source change is kept in the history, next to the original
+        let merged_history = entry.history.clone().unwrap();
+        assert_history_ordered(&merged_history);
+        assert_eq!(merged_history.entries.len(), 2);
+        assert_eq!(
+            merged_history.entries[0].get(fields::TITLE),
+            Some("entry1_updated_from_source")
+        );
+        assert_eq!(merged_history.entries[1].get(fields::TITLE), Some("entry1"));
+
+        // Merging the same source again should not result in any additional change.
+        let merge_result = destination_db.merge(&source_db).unwrap();
+        assert_eq!(merge_result.warnings.len(), 0);
+        assert_eq!(merge_result.events.len(), 0);
+
+        // Merging back the other way converges on the same entry.
+        let merge_result = source_db.merge(&destination_db).unwrap();
+        assert_eq!(merge_result.warnings.len(), 0);
+        let entry = source_db.entry(ENTRY1_ID).unwrap();
+        assert_eq!(entry.get(fields::TITLE), Some("entry1_updated_from_destination"));
+        assert_eq!(entry.history.clone().unwrap().entries.len(), 2);
+    }
+
     /// Test that a group updated in source is merged into destination when merging.
     #[test]
     fn test_group_update_in_source() {
@@ -2451,9 +2532,15 @@ mod merge_tests {
         source_db.entry_mut(ENTRY1_ID).unwrap().times.last_modification = None;
         source_db.entry_mut(ENTRY1_ID).unwrap().times.location_changed = None;
 
+        // the destination counts as newer, so the source's untimed edit is filed in the history
         let merge_result = destination_db.merge(&source_db).unwrap();
-        assert_eq!(merge_result.warnings.len(), 3);
-        assert_eq!(merge_result.events.len(), 0);
+        assert_eq!(merge_result.warnings.len(), 4);
+        assert_eq!(merge_result.events.len(), 1);
+        let history = destination_db.entry(ENTRY1_ID).unwrap().history.clone().unwrap();
+        assert_eq!(
+            history.entries[0].get(fields::TITLE),
+            Some("entry1_updated_title")
+        );
     }
 
     #[test]
