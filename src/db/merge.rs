@@ -3472,6 +3472,52 @@ mod merge_tests {
         );
     }
 
+    /// A loser already in history must not be filed again when the winner edits
+    /// again before the next merge of the same source: the newest history row is
+    /// then the winner's pre-edit state, not the loser.
+    #[test]
+    fn test_conflict_loser_is_filed_once_when_winner_edits_again_between_merges() {
+        let ancestor_db = create_test_database();
+        let mut self_db = ancestor_db.clone();
+        let mut other_db = ancestor_db.clone();
+
+        sleep();
+        other_db.entry_mut(ENTRY1_ID).unwrap().edit_tracking(|e| {
+            e.set_unprotected(fields::TITLE, "entry1_updated_in_other");
+        });
+        sleep();
+        self_db.entry_mut(ENTRY1_ID).unwrap().edit_tracking(|e| {
+            e.set_unprotected(fields::TITLE, "entry1_updated_in_self");
+        });
+
+        let other_rows = |db: &Database| {
+            db.entry(ENTRY1_ID)
+                .unwrap()
+                .history
+                .clone()
+                .unwrap()
+                .entries
+                .iter()
+                .filter(|e| e.get(fields::TITLE) == Some("entry1_updated_in_other"))
+                .count()
+        };
+
+        self_db.merge(&other_db).unwrap();
+        assert_eq!(other_rows(&self_db), 1, "the first merge files the loser once");
+
+        sleep();
+        self_db.entry_mut(ENTRY1_ID).unwrap().edit_tracking(|e| {
+            e.set_unprotected(fields::TITLE, "entry1_updated_again_in_self");
+        });
+
+        self_db.merge(&other_db).unwrap();
+        assert_eq!(
+            other_rows(&self_db),
+            1,
+            "re-merging the same source after another edit must not file the loser again"
+        );
+    }
+
     /// Identical values reached at different times are not a conflict and
     /// must not pollute history with a phantom loser.
     #[test]
