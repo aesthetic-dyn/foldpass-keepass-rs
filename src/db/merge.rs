@@ -56,13 +56,15 @@ pub struct MergeEvent {
 #[derive(Error, Debug)]
 #[non_exhaustive]
 pub enum MergeError {
-    /// Two entries with the same UUID have the same modification time but different contents.
-    #[error("Entries with UUID {0} have the same modification time but have diverged.")]
-    EntryModificationTimeNotUpdated(EntryId),
+    /// An entry's content differs from the common ancestor's while its modification time does
+    /// not: a client changed it without updating the timestamp.
+    #[error("Entry {0} was changed without updating its modification time.")]
+    EntryModifiedWithoutTimestamp(EntryId),
 
-    /// Two groups with the same UUID have the same modification time but different contents.
-    #[error("Groups with UUID {0} have the same modification time but have diverged.")]
-    GroupModificationTimeNotUpdated(GroupId),
+    /// A group's content differs from the common ancestor's while its modification time does
+    /// not: a client changed it without updating the timestamp.
+    #[error("Group {0} was changed without updating its modification time.")]
+    GroupModifiedWithoutTimestamp(GroupId),
 
     /// An entry has two history items sharing the same timestamp, so their order is ambiguous.
     #[error("Found history entries with the same timestamp ({0}) for entry {1}.")]
@@ -360,10 +362,20 @@ fn merge_groups(
 
         if dest_last_modification == source_last_modification {
             if have_groups_diverged(&dest, &source) {
-                // This should never happen.
-                //
-                // A group was updated without updating the last modification timestamp.
-                return Err(MergeError::GroupModificationTimeNotUpdated(id));
+                // The sides diverged within one second. An ancestor stamped that same second
+                // means neither side advanced the clock, so one of them changed the group
+                // without updating the timestamp: a client defect, not a tie to break.
+                if base_db.group(id).and_then(|g| g.times.last_modification) == Some(dest_last_modification) {
+                    return Err(MergeError::GroupModifiedWithoutTimestamp(id));
+                }
+                // Both sides changed the group within the same second (timestamps have no
+                // finer resolution), or there is no ancestor to tell an unstamped change
+                // from a collision. There is no telling which change is newer: keep the
+                // destination's.
+                log.warnings.push(format!(
+                    "Group {} was changed on both sides at the same time {}; kept the destination's version.",
+                    id, dest_last_modification,
+                ));
             }
             continue;
         }
@@ -583,13 +595,23 @@ fn merge_entries(
         });
 
         if dest_last_modification == source_last_modification {
-            if have_entries_diverged(&dest_entry, &source_entry) {
-                // This should never happen.
-                //
-                // An entry was updated without updating the last modification timestamp.
-                return Err(MergeError::EntryModificationTimeNotUpdated(id));
+            if !have_entry_contents_diverged(&dest_entry, &source_entry) {
+                continue;
             }
-            continue;
+            // The sides diverged within one second. An ancestor stamped that same second
+            // means neither side advanced the clock, so one of them changed the entry
+            // without updating the timestamp: a client defect, not a tie to break.
+            if base_db.entry(id).and_then(|e| e.times.last_modification) == Some(dest_last_modification) {
+                return Err(MergeError::EntryModifiedWithoutTimestamp(id));
+            }
+            // Both sides changed the entry within the same second (timestamps have no finer
+            // resolution), or there is no ancestor to tell an unstamped change from a
+            // collision. There is no telling which change is newer: keep the destination's,
+            // and file the source's in the history below so it is not lost.
+            log.warnings.push(format!(
+                "Entry {} was changed on both sides at the same time {}; kept the destination's version.",
+                id, dest_last_modification,
+            ));
         }
 
         // Three-way check: compare both sides against the common ancestor to distinguish
@@ -603,9 +625,13 @@ fn merge_entries(
             continue;
         }
 
-        if dest_changed && have_entries_diverged(&dest_entry, &source_entry) && base_last_modification.is_some()
+        if dest_changed
+            && have_entries_diverged(&dest_entry, &source_entry)
+            && base_last_modification.is_some()
+            && dest_last_modification != source_last_modification
         {
-            // both sides changed since the ancestor and content diverged — real conflict
+            // both sides changed since the ancestor and content diverged — real conflict;
+            // a same-second collision was already warned about above
             log.warnings.push(format!(
                 "Entry {id} was modified in both databases since the common ancestor. \
                  Resolving by keeping the most recently modified version.",
@@ -2525,9 +2551,13 @@ mod merge_tests {
             source_db.group(GROUP1_ID).unwrap().times
         );
 
-        // there will be an error during merge since the edit in source_db is not tracked and has
-        // the same timestamp as the group in destination_db
-        assert!(destination_db.merge(&source_db).is_err());
+        // the edit in source_db is not tracked and has the same timestamp as the group in
+        // destination_db, so there is no telling which is newer: the destination's is kept
+        let mut merged_db = destination_db.clone();
+        let merge_result = merged_db.merge(&source_db).unwrap();
+        assert_eq!(merge_result.warnings.len(), 1);
+        assert_eq!(merge_result.events.len(), 0);
+        assert_eq!(merged_db.group(GROUP1_ID).unwrap().name, "group1");
 
         // remove the timestamps to test warnings
         destination_db
@@ -2568,9 +2598,24 @@ mod merge_tests {
             source_db.entry(ENTRY1_ID).unwrap().times
         );
 
-        // there will be an error during merge since the edit in source_db is not tracked and has
-        // the same timestamp as the entry in destination_db
-        assert!(destination_db.merge(&source_db).is_err());
+        // the edit in source_db is not tracked and has the same timestamp as the entry in
+        // destination_db, so there is no telling which is newer: the destination's is kept and
+        // the source's is filed in the history
+        let mut merged_db = destination_db.clone();
+        let merge_result = merged_db.merge(&source_db).unwrap();
+        assert_eq!(merge_result.warnings.len(), 1);
+        assert_eq!(merge_result.events.len(), 1);
+        let entry = merged_db.entry(ENTRY1_ID).unwrap();
+        assert_eq!(entry.get(fields::TITLE), Some("entry1"));
+        let history = entry.history.clone().unwrap();
+        assert_eq!(
+            history.entries[0].get(fields::TITLE),
+            Some("entry1_updated_title")
+        );
+
+        // merging the same source again changes nothing more
+        let merge_result = merged_db.merge(&source_db).unwrap();
+        assert_eq!(merge_result.events.len(), 0);
 
         // remove the timestamps to test warnings
         destination_db
@@ -3344,11 +3389,11 @@ mod merge_tests {
         assert_eq!(result.events.len(), 0, "{:?}", result.events);
     }
 
-    /// The equal-timestamp refusal survives even with a true ancestor: an
-    /// entry whose content changed without its clock is an invariant
-    /// violation regardless of what the ancestor says.
+    /// An entry whose content changed without its clock is an invariant
+    /// violation the ancestor exposes: the timestamp still equals the
+    /// ancestor's while the content does not.
     #[test]
-    fn test_ancestor_equal_timestamp_divergence_still_errors() {
+    fn test_ancestor_unstamped_entry_change_errors() {
         let ancestor_db = create_test_database();
         let mut self_db = ancestor_db.clone();
         let mut other_db = ancestor_db.clone();
@@ -3360,12 +3405,12 @@ mod merge_tests {
 
         assert!(matches!(
             self_db.merge_with_ancestor(&other_db, &ancestor_db),
-            Err(MergeError::EntryModificationTimeNotUpdated(_))
+            Err(MergeError::EntryModifiedWithoutTimestamp(_))
         ));
     }
 
     #[test]
-    fn test_ancestor_group_equal_timestamp_divergence_still_errors() {
+    fn test_ancestor_unstamped_group_change_errors() {
         let ancestor_db = create_test_database();
         let mut self_db = ancestor_db.clone();
         let mut other_db = ancestor_db.clone();
@@ -3374,8 +3419,79 @@ mod merge_tests {
 
         assert!(matches!(
             self_db.merge_with_ancestor(&other_db, &ancestor_db),
-            Err(MergeError::GroupModificationTimeNotUpdated(_))
+            Err(MergeError::GroupModifiedWithoutTimestamp(_))
         ));
+    }
+
+    /// Both sides changed an entry within the same second after the ancestor:
+    /// a collision, not an unstamped change. The destination's version is
+    /// kept with one warning and the source's is filed in the history, once.
+    #[test]
+    fn test_ancestor_same_second_entry_collision_keeps_destination_and_files_source() {
+        let ancestor_db = create_test_database();
+        let mut self_db = ancestor_db.clone();
+        let mut other_db = ancestor_db.clone();
+
+        sleep();
+        self_db.entry_mut(ENTRY1_ID).unwrap().edit_tracking(|e| {
+            e.set_unprotected(fields::TITLE, "entry1_updated_in_self");
+        });
+        other_db.entry_mut(ENTRY1_ID).unwrap().edit_tracking(|e| {
+            e.set_unprotected(fields::TITLE, "entry1_updated_in_other");
+        });
+        // land both edits in the same second wherever the clock ticked
+        let stamp = self_db.entry(ENTRY1_ID).unwrap().times.last_modification;
+        other_db
+            .entries
+            .get_mut(&ENTRY1_ID)
+            .unwrap()
+            .times
+            .last_modification = stamp;
+
+        let result = self_db.merge_with_ancestor(&other_db, &ancestor_db).unwrap();
+        assert_eq!(result.warnings.len(), 1, "{:?}", result.warnings);
+        let entry = self_db.entry(ENTRY1_ID).unwrap();
+        assert_eq!(entry.get(fields::TITLE), Some("entry1_updated_in_self"));
+        let history = entry.history.clone().unwrap();
+        assert_history_ordered(&history);
+        assert_eq!(
+            history
+                .entries
+                .iter()
+                .filter(|e| e.get(fields::TITLE) == Some("entry1_updated_in_other"))
+                .count(),
+            1
+        );
+
+        let result = self_db.merge_with_ancestor(&other_db, &ancestor_db).unwrap();
+        assert_eq!(result.events.len(), 0, "{:?}", result.events);
+    }
+
+    /// The same collision on a group keeps the destination's version with a warning.
+    #[test]
+    fn test_ancestor_same_second_group_collision_keeps_destination_and_warns() {
+        let ancestor_db = create_test_database();
+        let mut self_db = ancestor_db.clone();
+        let mut other_db = ancestor_db.clone();
+
+        sleep();
+        self_db.group_mut(GROUP1_ID).unwrap().edit_tracking(|g| {
+            g.name = "renamed_in_self".to_string();
+        });
+        other_db.group_mut(GROUP1_ID).unwrap().edit_tracking(|g| {
+            g.name = "renamed_in_other".to_string();
+        });
+        let stamp = self_db.group(GROUP1_ID).unwrap().times.last_modification;
+        other_db
+            .groups
+            .get_mut(&GROUP1_ID)
+            .unwrap()
+            .times
+            .last_modification = stamp;
+
+        let result = self_db.merge_with_ancestor(&other_db, &ancestor_db).unwrap();
+        assert_eq!(result.warnings.len(), 1, "{:?}", result.warnings);
+        assert_eq!(self_db.group(GROUP1_ID).unwrap().name, "renamed_in_self");
     }
 
     /// The conflict warning is gated on the ancestor entry carrying a
@@ -3714,9 +3830,11 @@ mod merge_tests {
         assert_eq!(result.events.len(), 0, "{:?}", result.events);
     }
 
-    /// A real value difference at an equal modification time still refuses.
+    /// A real value difference at an equal modification time, with no ancestor
+    /// to tell an unstamped change from a same-second collision, keeps the
+    /// destination's value, warns, and files the source's in the history.
     #[test]
-    fn test_real_divergence_at_equal_timestamps_still_errors() {
+    fn test_real_divergence_at_equal_timestamps_warns_without_ancestor() {
         let mut destination_db = create_test_database();
         let mut source_db = destination_db.clone();
         source_db
@@ -3726,10 +3844,12 @@ mod merge_tests {
             .fields
             .insert("Notes".to_string(), Value::unprotected("actual content"));
 
-        assert!(matches!(
-            destination_db.merge(&source_db),
-            Err(MergeError::EntryModificationTimeNotUpdated(_))
-        ));
+        let result = destination_db.merge(&source_db).unwrap();
+        assert_eq!(result.warnings.len(), 1, "{:?}", result.warnings);
+        let entry = destination_db.entry(ENTRY1_ID).unwrap();
+        assert_eq!(entry.get("Notes"), None);
+        let history = entry.history.clone().unwrap();
+        assert_eq!(history.entries[0].get("Notes"), Some("actual content"));
     }
 
     /// Only content — field values and tags — counts as divergence, and a
