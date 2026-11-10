@@ -14,8 +14,8 @@ pub struct Times {
     pub last_modification_time: Option<Timestamp>,
     #[serde(default, with = "cs_opt_string", skip_serializing_if = "Option::is_none")]
     pub last_access_time: Option<Timestamp>,
-    #[serde(default, with = "cs_opt_string", skip_serializing_if = "Option::is_none")]
-    pub expiry_time: Option<Timestamp>,
+    #[serde(default)]
+    pub expiry_time: Timestamp,
 
     #[serde(default, with = "cs_opt_bool", skip_serializing_if = "Option::is_none")]
     pub expires: Option<bool>,
@@ -32,7 +32,7 @@ impl From<Times> for crate::db::Times {
             creation: t.creation_time.as_ref().map(|ts| ts.time),
             last_modification: t.last_modification_time.as_ref().map(|ts| ts.time),
             last_access: t.last_access_time.as_ref().map(|ts| ts.time),
-            expiry: t.expiry_time.as_ref().map(|ts| ts.time),
+            expiry: t.expiry_time.time,
             location_changed: t.location_changed.as_ref().map(|ts| ts.time),
             expires: t.expires,
             usage_count: t.usage_count,
@@ -46,7 +46,7 @@ impl From<crate::db::Times> for Times {
             creation_time: t.creation.map(|time| time.into()),
             last_modification_time: t.last_modification.map(|time| time.into()),
             last_access_time: t.last_access.map(|time| time.into()),
-            expiry_time: t.expiry.map(|time| time.into()),
+            expiry_time: t.expiry.into(),
             location_changed: t.location_changed.map(|time| time.into()),
             expires: t.expires,
             usage_count: t.usage_count,
@@ -90,7 +90,7 @@ mod tests {
         );
 
         assert_eq!(
-            times.expiry_time.unwrap().time,
+            times.expiry_time.time,
             chrono::NaiveDateTime::parse_from_str("2023-12-31T23:59:59", "%Y-%m-%dT%H:%M:%S").unwrap()
         );
 
@@ -98,5 +98,33 @@ mod tests {
             times.location_changed.unwrap().time,
             chrono::NaiveDateTime::parse_from_str("2023-10-08T12:34:56", "%Y-%m-%dT%H:%M:%S").unwrap()
         );
+    }
+
+    /// A file written before the expiry time became required has no ExpiryTime. It
+    /// must read as one fixed instant, never the time of parsing: every copy of the
+    /// database then derives the same value, and the next save writes it out.
+    #[test]
+    fn test_missing_expiry_time_reads_as_the_epoch_and_is_written_back() {
+        let xml = r#"<Times>
+            <CreationTime>2023-10-05T12:34:56Z</CreationTime>
+            <LastModificationTime>2023-10-06T12:34:56Z</LastModificationTime>
+        </Times>"#;
+        let times: Times = quick_xml::de::from_str(xml).unwrap();
+        assert_eq!(times.expiry_time.time, crate::db::Times::epoch());
+        assert_eq!(
+            times.expires, None,
+            "a missing expiry time must not start expiring anything"
+        );
+
+        let again: Times = quick_xml::de::from_str(xml).unwrap();
+        assert_eq!(again.expiry_time.time, times.expiry_time.time);
+
+        let db_times: crate::db::Times = times.into();
+        assert_eq!(db_times.expiry, crate::db::Times::epoch());
+        assert_eq!(db_times.expires, None);
+
+        let written = quick_xml::se::to_string(&Times::from(db_times)).unwrap();
+        assert!(written.contains("<ExpiryTime>"), "{}", written);
+        assert!(!written.contains("<Expires>"), "{}", written);
     }
 }
