@@ -99,4 +99,32 @@ mod tests {
             chrono::NaiveDateTime::parse_from_str("2023-10-08T12:34:56", "%Y-%m-%dT%H:%M:%S").unwrap()
         );
     }
+
+    /// A file written before the expiry time became required has no ExpiryTime. It
+    /// must read as one fixed instant, never the time of parsing: every copy of the
+    /// database then derives the same value, and the next save writes it out.
+    #[test]
+    fn test_missing_expiry_time_reads_as_the_epoch_and_is_written_back() {
+        let xml = r#"<Times>
+            <CreationTime>2023-10-05T12:34:56Z</CreationTime>
+            <LastModificationTime>2023-10-06T12:34:56Z</LastModificationTime>
+        </Times>"#;
+        let times: Times = quick_xml::de::from_str(xml).unwrap();
+        assert_eq!(times.expiry_time.time, crate::db::Times::epoch());
+        assert_eq!(
+            times.expires, None,
+            "a missing expiry time must not start expiring anything"
+        );
+
+        let again: Times = quick_xml::de::from_str(xml).unwrap();
+        assert_eq!(again.expiry_time.time, times.expiry_time.time);
+
+        let db_times: crate::db::Times = times.into();
+        assert_eq!(db_times.expiry, crate::db::Times::epoch());
+        assert_eq!(db_times.expires, None);
+
+        let written = quick_xml::se::to_string(&Times::from(db_times)).unwrap();
+        assert!(written.contains("<ExpiryTime>"), "{}", written);
+        assert!(!written.contains("<Expires>"), "{}", written);
+    }
 }
